@@ -70,3 +70,9 @@ To deploy this stack run `cdk deploy --all`
 2. Configure the rule to send autoshift events to an SQS queue.
 3. Create an IAM role for the zonal-autoshift-karpenter pod to assume that allows it to poll and read messages from the queue. If using IRSA, add the roleArn to the pod's service account. If using Pod Identity, create a pod identity association. 
 4. Apply the zonal-autoshift-karpenter deployment.yaml
+
+## Security
+See [CONTRIBUTING](./CONTRIBUTING) for more information.
+
+## License
+This library is licensed under the MIT-0 License. See the LICENSE file.

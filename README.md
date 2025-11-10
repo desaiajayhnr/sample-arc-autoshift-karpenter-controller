@@ -9,7 +9,7 @@ When a zonal autoshift is "completed" or "cancelled", the changes are reverted, 
 
 > Important: when zones are removed from a Karpenter node pool, all of the instances that were provisioned into that zone will be terminated. The pods running on those nodes will either be scheduled onto other nodes within the cluster or, Karpenter will provision new nodes in the healthy zones. So long as your pod's topology constraints are flexible enough, the pods will get rescheduled onto the new nodes. This differs from the behavior exhibited by nodes in a Managed Node Groups. During an autoshift, the Application Recovery Controller (ARC) will cordon the nodes in the impaired zone, remove the impaired zone from the ASGs that backs the MNG, and updates endpoint slices to divert traffic away from pods running on instances in the impaired zone, however, the pods (and nodes) in the impaired zone will continue running. The replica count for your deployments will be unaffected, but the capacity of your applications may temporarily drop, at least until the HPA can scale your Deployments.
 
-Since this is reference implementation, this controller should not be used in production environments. AWS Support will not provide support for this project, however, it's maintainers will provide best effort support when possible. If you choose to use this project, you do so at your own risk. 
+Since this is reference implementation, this controller should not be used in production environments. AWS Support will not provide support for this project, however, its maintainers will provide best effort support when possible. If you choose to use this project, you do so at your own risk. 
 
 
 # Welcome to your CDK Python project!

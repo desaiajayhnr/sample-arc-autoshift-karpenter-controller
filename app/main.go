@@ -868,7 +868,7 @@ func updateKarpenterNodePool(event Event) {
                                 newNodePoolName := pool.Metadata.Name + "-kss"
                                 log.Printf("[updateKarpenterNodePool] Creating new node pool %s from %s", newNodePoolName, pool.Metadata.Name)
                                 
-                                weight := 10
+                                weight := 50
                                 nodePoolItem := NodePool{
                                         APIVersion: pool.APIVersion,
                                         Kind:       pool.Kind,
@@ -958,6 +958,14 @@ func updateKarpenterNodePool(event Event) {
                                 err = CreateNodePool(ctx, "default", newNodePoolName, newNodePoolJSON)
                                 if err != nil {
                                         log.Printf("[updateKarpenterNodePool] Failed to create node pool %s: %v", newNodePoolName, err)
+                                }
+                                
+                                // Add NoExecute taint to nodes in the impaired zone
+                                awayZoneName := getZoneNameFromZoneId(awayFrom, event.Region)
+                                if awayZoneName != "" && globalNodeController != nil {
+                                        if err := globalNodeController.TaintNodesInAZ(ctx, awayZoneName); err != nil {
+                                                log.Printf("[updateKarpenterNodePool] Error tainting nodes in AZ %s: %v", awayZoneName, err)
+                                        }
                                 }
                         } else {
                                 // Update other node pools in-place
@@ -1396,6 +1404,13 @@ func restoreKarpenterNodePool(event Event) {
         }
 
         if isAutoMode {
+                // Remove NoExecute taint from nodes in the restored zone
+                if globalNodeController != nil {
+                        if err := globalNodeController.RemoveTaintFromNodes(context.TODO(), awayZoneName); err != nil {
+                                log.Printf("[restoreKarpenterNodePool] Error removing taint from nodes in AZ %s: %v", awayZoneName, err)
+                        }
+                }
+                
                 // Handle both temporary and custom node pools
                 for _, pool := range nodePoolList.Items {
                         if pool.Metadata.Name == "general-purpose-kss" || pool.Metadata.Name == "system-kss" {

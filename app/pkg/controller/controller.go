@@ -9,6 +9,7 @@ import (
 	"project/zonal-shift/pkg/client"
 	"project/zonal-shift/pkg/models"
 	"project/zonal-shift/pkg/utils"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -389,4 +390,98 @@ func (c *NodeClaimController) uncordonNode(ctx context.Context, nodeName string)
 	// Update the node
 	_, err = c.clientset.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
 	return err
+}
+
+const (
+	zonalShiftTaintKey = "zonal-autoshift.eks.amazonaws.com/away-zone"
+)
+
+// TaintNodesInAZ adds NoExecute taint to nodes in the specified AZ
+func (c *NodeClaimController) TaintNodesInAZ(ctx context.Context, az string) error {
+	log.Printf("[TaintNodesInAZ] Adding NoExecute taint to nodes in AZ %s", az)
+
+	nodes := c.GetNodesByAZ(az)
+	if len(nodes) == 0 {
+		log.Printf("[TaintNodesInAZ] No nodes found in AZ %s", az)
+		return nil
+	}
+
+	for _, nodeInfo := range nodes {
+		if nodeInfo.NodeName == "" {
+			continue
+		}
+
+		node, err := c.clientset.CoreV1().Nodes().Get(ctx, nodeInfo.NodeName, metav1.GetOptions{})
+		if err != nil {
+			log.Printf("[TaintNodesInAZ] Error getting node %s: %v", nodeInfo.NodeName, err)
+			continue
+		}
+
+		// Check if taint already exists
+		taintExists := false
+		for _, t := range node.Spec.Taints {
+			if t.Key == zonalShiftTaintKey {
+				taintExists = true
+				break
+			}
+		}
+
+		if !taintExists {
+			node.Spec.Taints = append(node.Spec.Taints, corev1.Taint{
+				Key:    zonalShiftTaintKey,
+				Value:  az,
+				Effect: corev1.TaintEffectNoExecute,
+			})
+
+			_, err = c.clientset.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
+			if err != nil {
+				log.Printf("[TaintNodesInAZ] Error tainting node %s: %v", nodeInfo.NodeName, err)
+				continue
+			}
+			log.Printf("[TaintNodesInAZ] Added NoExecute taint to node %s", nodeInfo.NodeName)
+		}
+	}
+	return nil
+}
+
+// RemoveTaintFromNodes removes the NoExecute taint from nodes in the specified AZ
+func (c *NodeClaimController) RemoveTaintFromNodes(ctx context.Context, az string) error {
+	log.Printf("[RemoveTaintFromNodes] Removing NoExecute taint from nodes in AZ %s", az)
+
+	nodes := c.GetNodesByAZ(az)
+	if len(nodes) == 0 {
+		log.Printf("[RemoveTaintFromNodes] No nodes found in AZ %s", az)
+		return nil
+	}
+
+	for _, nodeInfo := range nodes {
+		if nodeInfo.NodeName == "" {
+			continue
+		}
+
+		node, err := c.clientset.CoreV1().Nodes().Get(ctx, nodeInfo.NodeName, metav1.GetOptions{})
+		if err != nil {
+			log.Printf("[RemoveTaintFromNodes] Error getting node %s: %v", nodeInfo.NodeName, err)
+			continue
+		}
+
+		// Remove the taint
+		var newTaints []corev1.Taint
+		for _, t := range node.Spec.Taints {
+			if t.Key != zonalShiftTaintKey {
+				newTaints = append(newTaints, t)
+			}
+		}
+
+		if len(newTaints) != len(node.Spec.Taints) {
+			node.Spec.Taints = newTaints
+			_, err = c.clientset.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
+			if err != nil {
+				log.Printf("[RemoveTaintFromNodes] Error removing taint from node %s: %v", nodeInfo.NodeName, err)
+				continue
+			}
+			log.Printf("[RemoveTaintFromNodes] Removed NoExecute taint from node %s", nodeInfo.NodeName)
+		}
+	}
+	return nil
 }

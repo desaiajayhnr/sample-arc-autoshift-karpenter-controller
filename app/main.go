@@ -8,16 +8,19 @@ import (
         "os"
         "sync"
         "time"
+        "github.com/aws/aws-sdk-go-v2/aws"
         "github.com/aws/aws-sdk-go-v2/config"
         "github.com/aws/aws-sdk-go-v2/service/ec2"
         ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+        "github.com/aws/aws-sdk-go-v2/service/eks"
         "github.com/aws/aws-sdk-go-v2/service/sqs"
+        "project/zonal-shift/pkg/controller"
         "k8s.io/client-go/kubernetes"
         "k8s.io/client-go/rest"
         "k8s.io/apimachinery/pkg/types"
         metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-        // "k8s.io/client-go/tools/leaderelection"
-        // "k8s.io/client-go/tools/leaderelection/resourcelock"
+        "k8s.io/client-go/tools/leaderelection"
+        "k8s.io/client-go/tools/leaderelection/resourcelock"
         "k8s.io/client-go/dynamic"
         "k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -28,6 +31,9 @@ var (
         zoneMutex   sync.RWMutex
         clusterZones []string
         clusterZonesMutex sync.RWMutex
+        doNotDisruptEnabled bool // Flag to enable/disable do-not-disrupt feature
+        isLeader bool // Flag to track leader status
+        globalNodeController *controller.NodeClaimController // Global controller for node tracking
 )
 
 // SQSMessage represents the structure of an SQS message from EventBridge
@@ -76,6 +82,13 @@ type NodePoolMetadata struct {
     Annotations map[string]string `json:"annotations,omitempty"`
 }
 
+// Taint represents a Kubernetes taint
+type Taint struct {
+    Key    string `json:"key"`
+    Value  string `json:"value,omitempty"`
+    Effect string `json:"effect"`
+}
+
 // NodePool represents the structure of a Karpenter NodePool
 type NodePool struct {
     APIVersion string           `json:"apiVersion"`
@@ -97,6 +110,7 @@ type NodePool struct {
                     Operator string   `json:"operator"`
                     Values   []string `json:"values"`
                 } `json:"requirements"`
+                Taints []Taint `json:"taints,omitempty"`
                 NodeClassRef struct {
                     Name  string `json:"name"`
                     Kind  string `json:"kind"`
@@ -178,6 +192,16 @@ func main() {
                 os.Exit(0)
         }
 
+        // Parse command-line arguments for do-not-disrupt feature
+        doNotDisruptEnabled = false
+        for i := 1; i < len(os.Args); i++ {
+                if os.Args[i] == "--enable-do-not-disrupt" || os.Args[i] == "-d" {
+                        doNotDisruptEnabled = true
+                        log.Println("[main] do-not-disrupt feature enabled via command-line argument")
+                        break
+                }
+        }
+
         var err error
 
         // Get pod name and namespace for leader election
@@ -217,56 +241,83 @@ func main() {
         // Create SQS client
         sqsClient := sqs.NewFromConfig(awsCfg)
 
-        // Start SQS polling directly without leader election
-        log.Printf("Starting SQS polling for queue: %s", queueURL)
-        pollSQS(sqsClient, queueURL, podName)
+        // Create Kubernetes clientset for leader election
+        k8sConfig, err := rest.InClusterConfig()
+        if err != nil {
+                log.Fatalf("Failed to create cluster config: %v", err)
+        }
+        
+        clientset, err := kubernetes.NewForConfig(k8sConfig)
+        if err != nil {
+                log.Fatalf("Failed to create clientset: %v", err)
+        }
 
-        // // Leader election logic commented out since SQS provides natural coordination
-        // // Create a context for leader election
-        // log.Printf("Starting leader election for pod %s in namespace %s", podName, namespace)
+        // Initialize NodeClaim controller to track nodes in memory
+        log.Println("Initializing NodeClaim controller...")
+        dynamicClient, err := dynamic.NewForConfig(k8sConfig)
+        if err != nil {
+                log.Fatalf("Failed to create dynamic client: %v", err)
+        }
+        globalNodeController = controller.NewNodeClaimController(dynamicClient, clientset)
+        
+        // Start the controller in background to watch NodeClaims
+        controllerCtx, controllerCancel := context.WithCancel(context.Background())
+        defer controllerCancel()
+        go func() {
+                if err := globalNodeController.Run(controllerCtx); err != nil {
+                        log.Printf("NodeClaim controller error: %v", err)
+                }
+        }()
+        log.Println("NodeClaim controller started successfully")
 
-        // ctx, cancel := context.WithCancel(context.Background())
-        // defer cancel()
+        // Start leader election
+        log.Printf("Starting leader election for pod %s in namespace %s", podName, namespace)
+        
+        ctx, cancel := context.WithCancel(context.Background())
+        defer cancel()
+        
+        // Configure leader election
+        lock := &resourcelock.LeaseLock{
+                LeaseMeta: metav1.ObjectMeta{
+                        Name:      "karpenter-sqs-subscriber-leader",
+                        Namespace: namespace,
+                },
+                Client: clientset.CoordinationV1(),
+                LockConfig: resourcelock.ResourceLockConfig{
+                        Identity: podName,
+                },
+        }
+        
+        // Start leader election
+        leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
+                Lock:            lock,
+                ReleaseOnCancel: true,
+                LeaseDuration:   15 * time.Second,
+                RenewDeadline:   10 * time.Second,
+                RetryPeriod:     2 * time.Second,
+                Callbacks: leaderelection.LeaderCallbacks{
+                        OnStartedLeading: func(ctx context.Context) {
+                                log.Printf("Pod %s started leading", podName)
+                                isLeader = true
+                                // Start SQS polling when becoming leader
+                                log.Printf("Starting SQS polling for queue: %s", queueURL)
+                                pollSQS(sqsClient, queueURL, podName)
+                        },
+                        OnStoppedLeading: func() {
+                                log.Printf("Pod %s stopped leading", podName)
+                                isLeader = false
+                        },
+                        OnNewLeader: func(identity string) {
+                                if identity == podName {
+                                        log.Printf("This pod (%s) is the new leader", podName)
+                                } else {
+                                        log.Printf("New leader elected: %s (this pod: %s)", identity, podName)
+                                }
+                        },
+                },
+        })
 
-        // // Configure leader election
-        // lock := &resourcelock.LeaseLock{
-        //         LeaseMeta: metav1.ObjectMeta{
-        //                 Name:      "karpenter-sqs-subscriber-leader",
-        //                 Namespace: namespace,
-        //         },
-        //         Client: clientset.CoordinationV1(),
-        //         LockConfig: resourcelock.ResourceLockConfig{
-        //                 Identity: podName,
-        //         },
-        // }
 
-        // // Start leader election
-        // leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
-        //         Lock:            lock,
-        //         ReleaseOnCancel: true,
-        //         LeaseDuration:   15 * time.Second,
-        //         RenewDeadline:   10 * time.Second,
-        //         RetryPeriod:     2 * time.Second,
-        //         Callbacks: leaderelection.LeaderCallbacks{
-        //                 OnStartedLeading: func(ctx context.Context) {
-        //                         log.Printf("Pod %s started leading", podName)
-        //                         isLeader = true
-        //                 },
-        //                 OnStoppedLeading: func() {
-        //                         log.Printf("Pod %s stopped leading", podName)
-        //                         isLeader = false
-        //                         // Don't exit - just stop being the leader
-        //                         // The pod should continue running and be ready to become leader again
-        //                 },
-        //                 OnNewLeader: func(identity string) {
-        //                         if identity == podName {
-        //                                 log.Printf("This pod (%s) is the new leader", podName)
-        //                         } else {
-        //                                 log.Printf("New leader elected: %s (this pod: %s)", identity, podName)
-        //                         }
-        //                 },
-        //         },
-        // })
 }
 
 // listInstalledCRDs checks if nodeclasses.eks.amazonaws.com CRD exists
@@ -299,12 +350,12 @@ func listInstalledCRDs(config *rest.Config) bool {
 // pollSQS continuously polls SQS for messages
 func pollSQS(sqsClient *sqs.Client, queueURL, podName string) {
         for {
-                // // Leader election check commented out - SQS provides natural coordination
-                // if !isLeader {
-                //         log.Printf("[pollSQS] Pod %s is not leader, sleeping", podName)
-                //         time.Sleep(10 * time.Second)
-                //         continue
-                // }
+                // Leader election check - only process messages if this pod is the leader
+                if !isLeader {
+                        log.Printf("[pollSQS] Pod %s is not leader, sleeping", podName)
+                        time.Sleep(10 * time.Second)
+                        continue
+                }
 
                 log.Printf("[pollSQS] Polling SQS queue from pod: %s", podName)
                 
@@ -466,6 +517,30 @@ func getZoneNameFromZoneId(zoneId, region string) string {
 // 	}))
 // }
 
+// getEKSClusterVPCId gets the VPC ID of the EKS cluster
+func getEKSClusterVPCId(region, clusterName string) (string, error) {
+        awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(region))
+        if err != nil {
+                return "", fmt.Errorf("failed to load AWS config: %v", err)
+        }
+        
+        eksClient := eks.NewFromConfig(awsCfg)
+        result, err := eksClient.DescribeCluster(context.TODO(), &eks.DescribeClusterInput{
+                Name: &clusterName,
+        })
+        if err != nil {
+                return "", fmt.Errorf("failed to describe EKS cluster: %v", err)
+        }
+        
+        if result.Cluster == nil || result.Cluster.ResourcesVpcConfig == nil || result.Cluster.ResourcesVpcConfig.VpcId == nil {
+                return "", fmt.Errorf("VPC ID not found for cluster %s", clusterName)
+        }
+        
+        vpcId := *result.Cluster.ResourcesVpcConfig.VpcId
+        log.Printf("[getEKSClusterVPCId] Found VPC ID %s for cluster %s", vpcId, clusterName)
+        return vpcId, nil
+}
+
 // getEKSClusterZones gets zones where EKS cluster VPC has subnets
 func getEKSClusterZones(region string, isAutoMode bool) ([]string, error) {
         awsCfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(region))
@@ -479,18 +554,49 @@ func getEKSClusterZones(region string, isAutoMode bool) ([]string, error) {
                 return nil, fmt.Errorf("CLUSTER_NAME environment variable not set")
         }
         
+        // Get the VPC ID of the EKS cluster
+        vpcId, err := getEKSClusterVPCId(region, clusterName)
+        if err != nil {
+                return nil, fmt.Errorf("failed to get EKS cluster VPC ID: %v", err)
+        }
+        
         var subnetsInput *ec2.DescribeSubnetsInput
         
         if isAutoMode {
-                // For auto mode, find subnets tagged with cluster name
+                // For auto mode, try multiple tag patterns
                 clusterTagKey := "tag:kubernetes.io/cluster/" + clusterName
+                log.Printf("[getEKSClusterZones] Looking for subnets with tag: %s in VPC: %s", clusterTagKey, vpcId)
+                
                 subnetsInput = &ec2.DescribeSubnetsInput{
                         Filters: []ec2types.Filter{
                                 {
                                         Name:   &clusterTagKey,
                                         Values: []string{"owned", "shared"},
                                 },
+                                {
+                                        Name:   aws.String("vpc-id"),
+                                        Values: []string{vpcId},
+                                },
                         },
+                }
+                
+                // If no subnets found with cluster tag, try eks.amazonaws.com/cluster tag
+                subnetsOutput, err := ec2Client.DescribeSubnets(context.TODO(), subnetsInput)
+                if err == nil && len(subnetsOutput.Subnets) == 0 {
+                        log.Printf("[getEKSClusterZones] No subnets found with kubernetes.io/cluster tag, trying eks.amazonaws.com/cluster")
+                        eksTagKey := "tag:eks.amazonaws.com/cluster"
+                        subnetsInput = &ec2.DescribeSubnetsInput{
+                                Filters: []ec2types.Filter{
+                                        {
+                                                Name:   &eksTagKey,
+                                                Values: []string{clusterName},
+                                        },
+                                        {
+                                                Name:   aws.String("vpc-id"),
+                                                Values: []string{vpcId},
+                                        },
+                                },
+                        }
                 }
         } else {
                 // For standard mode, find subnets tagged for Karpenter discovery
@@ -500,6 +606,10 @@ func getEKSClusterZones(region string, isAutoMode bool) ([]string, error) {
                                 {
                                         Name:   &tagKey,
                                         Values: []string{clusterName},
+                                },
+                                {
+                                        Name:   aws.String("vpc-id"),
+                                        Values: []string{vpcId},
                                 },
                         },
                 }
@@ -511,13 +621,34 @@ func getEKSClusterZones(region string, isAutoMode bool) ([]string, error) {
                 return nil, fmt.Errorf("failed to describe subnets: %v", err)
         }
         
-        log.Printf("[getEKSClusterZones] Found %d subnets", len(subnetsOutput.Subnets))
+        // If still no subnets found in auto mode, fall back to all subnets in the EKS cluster's VPC
+        if isAutoMode && len(subnetsOutput.Subnets) == 0 {
+                log.Printf("[getEKSClusterZones] No tagged subnets found, falling back to all subnets in VPC %s", vpcId)
+                subnetsInput = &ec2.DescribeSubnetsInput{
+                        Filters: []ec2types.Filter{
+                                {
+                                        Name:   aws.String("vpc-id"),
+                                        Values: []string{vpcId},
+                                },
+                                {
+                                        Name:   aws.String("state"),
+                                        Values: []string{"available"},
+                                },
+                        },
+                }
+                subnetsOutput, err = ec2Client.DescribeSubnets(context.TODO(), subnetsInput)
+                if err != nil {
+                        return nil, fmt.Errorf("failed to describe subnets in VPC: %v", err)
+                }
+        }
+        
+        log.Printf("[getEKSClusterZones] Found %d subnets in VPC %s", len(subnetsOutput.Subnets), vpcId)
         
         // Extract unique zones from subnets
         zoneSet := make(map[string]bool)
         for _, subnet := range subnetsOutput.Subnets {
                 if subnet.AvailabilityZone != nil {
-                        log.Printf("[getEKSClusterZones] Found subnet %s in zone %s", *subnet.SubnetId, *subnet.AvailabilityZone)
+                        log.Printf("[getEKSClusterZones] Found subnet %s in zone %s (VPC: %s)", *subnet.SubnetId, *subnet.AvailabilityZone, vpcId)
                         zoneSet[*subnet.AvailabilityZone] = true
                 }
         }
@@ -527,7 +658,7 @@ func getEKSClusterZones(region string, isAutoMode bool) ([]string, error) {
                 zones = append(zones, zone)
         }
         
-        log.Printf("[getEKSClusterZones] Found EKS cluster zones (autoMode=%v): %v", isAutoMode, zones)
+        log.Printf("[getEKSClusterZones] Found EKS cluster zones (autoMode=%v, VPC=%s): %v", isAutoMode, vpcId, zones)
         return zones, nil
 }
 
@@ -541,18 +672,24 @@ func getUpdatedZones(event Event, isAutoMode bool) ([]string) {
         copy(cachedClusterZones, clusterZones)
         clusterZonesMutex.RUnlock()
         
+        log.Printf("[getUpdatedZones] Cached cluster zones: %v", cachedClusterZones)
+        
         // Get awayFrom from metadata if available, otherwise from detail
         awayFrom := event.Detail.AwayFrom
         if event.Detail.Metadata.AwayFrom != "" {
                 awayFrom = event.Detail.Metadata.AwayFrom
         }
         
+        log.Printf("[getUpdatedZones] AwayFrom zone ID: %s", awayFrom)
+        
         // Get zone name from zone ID for comparison
         awayZoneName := getZoneNameFromZoneId(awayFrom, event.Region)
         if awayZoneName == "" {
-                log.Printf("[getUpdatedZones] Failed to get zone name for zone ID: %s in cached mapping", awayFrom)
+                log.Printf("[getUpdatedZones] Failed to get zone name for zone ID: %s in cached mapping, returning all zones", awayFrom)
                 return cachedClusterZones // Return all zones if we can't identify the away zone
         }
+        
+        log.Printf("[getUpdatedZones] AwayFrom zone name: %s", awayZoneName)
         
         var updatedZones []string
         for _, zone := range cachedClusterZones {
@@ -641,6 +778,32 @@ func updateKarpenterNodePool(event Event) {
                 return
         }
 
+        // Check if do-not-disrupt feature is enabled
+        if doNotDisruptEnabled {
+                log.Println("[updateKarpenterNodePool] do-not-disrupt feature enabled")
+
+                // Get zone name from zone ID
+                awayZoneName := getZoneNameFromZoneId(awayFrom, event.Region)
+                if awayZoneName == "" {
+                        log.Printf("[updateKarpenterNodePool] Failed to get zone name for zone ID: %s", awayFrom)
+                        awayZoneName = awayFrom
+                }
+
+                // Use global controller to annotate and cordon nodes
+                if globalNodeController != nil {
+                        if err := globalNodeController.AnnotateAndCordonNodes(context.TODO(), awayZoneName); err != nil {
+                                // This is expected if no Karpenter nodes exist in the zone yet
+                                log.Printf("[updateKarpenterNodePool] Note: %v (this is normal if no Karpenter nodes exist in this zone)", err)
+                        } else {
+                                log.Printf("[updateKarpenterNodePool] Successfully annotated and cordoned nodes in AZ %s", awayZoneName)
+                        }
+                } else {
+                        log.Printf("[updateKarpenterNodePool] NodeClaim controller not initialized, skipping node annotation")
+                }
+        } else {
+                log.Println("[updateKarpenterNodePool] do-not-disrupt feature disabled, skipping node annotation and cordoning")
+        }
+
         log.Println("[updateKarpenterNodePool] Retrieving Karpenter node pools...")
         nodePools, err := clientset.RESTClient().Get().AbsPath("/apis/karpenter.sh/v1/nodepools").DoRaw(context.TODO())
         if err != nil {
@@ -668,6 +831,7 @@ func updateKarpenterNodePool(event Event) {
                                                         Operator string   `json:"operator"`
                                                         Values   []string `json:"values"`
                                                 } `json:"requirements"`
+                                                Taints []Taint `json:"taints,omitempty"`
                                                 NodeClassRef struct {
                                                         Name  string `json:"name"`
                                                         Kind  string `json:"kind"`
@@ -704,7 +868,7 @@ func updateKarpenterNodePool(event Event) {
                                 newNodePoolName := pool.Metadata.Name + "-kss"
                                 log.Printf("[updateKarpenterNodePool] Creating new node pool %s from %s", newNodePoolName, pool.Metadata.Name)
                                 
-                                weight := 10
+                                weight := 50
                                 nodePoolItem := NodePool{
                                         APIVersion: pool.APIVersion,
                                         Kind:       pool.Kind,
@@ -752,15 +916,27 @@ func updateKarpenterNodePool(event Event) {
                                         Values:   updatedZones,
                                 })
                                 
+                                // Copy taints only for system nodepool (system has CriticalAddonsOnly taint)
+                                if pool.Metadata.Name == "system" && len(pool.Spec.Template.Spec.Taints) > 0 {
+                                        nodePoolItem.Spec.Template.Spec.Taints = make([]Taint, len(pool.Spec.Template.Spec.Taints))
+                                        copy(nodePoolItem.Spec.Template.Spec.Taints, pool.Spec.Template.Spec.Taints)
+                                        log.Printf("[updateKarpenterNodePool] Copied %d taints to new node pool %s", len(pool.Spec.Template.Spec.Taints), newNodePoolName)
+                                }
+                                
                                 // Copy disruption settings
                                 nodePoolItem.Spec.Disruption.Budgets = make([]struct {
                                         Nodes string `json:"nodes"`
                                 }, 0)
                                 if len(pool.Spec.Disruption.Budgets) > 0 {
+                                        budgetValue := pool.Spec.Disruption.Budgets[0].Nodes
+                                        // if doNotDisruptEnabled {
+                                        //         budgetValue = "0"
+                                        //         log.Printf("[updateKarpenterNodePool] Setting disruption budget to 0 for node pool %s (do-not-disrupt enabled)", newNodePoolName)
+                                        // }
                                         nodePoolItem.Spec.Disruption.Budgets = append(nodePoolItem.Spec.Disruption.Budgets, struct {
                                                 Nodes string `json:"nodes"`
                                         }{
-                                                Nodes: pool.Spec.Disruption.Budgets[0].Nodes,
+                                                Nodes: budgetValue,
                                         })
                                 }
                                 nodePoolItem.Spec.Disruption.ConsolidateAfter = pool.Spec.Disruption.ConsolidateAfter
@@ -782,6 +958,16 @@ func updateKarpenterNodePool(event Event) {
                                 err = CreateNodePool(ctx, "default", newNodePoolName, newNodePoolJSON)
                                 if err != nil {
                                         log.Printf("[updateKarpenterNodePool] Failed to create node pool %s: %v", newNodePoolName, err)
+                                }
+                                
+                                // Add NoExecute taint to nodes in the impaired zone only if do-not-disrupt is disabled
+                                if !doNotDisruptEnabled {
+                                        awayZoneName := getZoneNameFromZoneId(awayFrom, event.Region)
+                                        if awayZoneName != "" && globalNodeController != nil {
+                                                if err := globalNodeController.TaintNodesInAZ(ctx, awayZoneName); err != nil {
+                                                        log.Printf("[updateKarpenterNodePool] Error tainting nodes in AZ %s: %v", awayZoneName, err)
+                                                }
+                                        }
                                 }
                         } else {
                                 // Update other node pools in-place
@@ -809,6 +995,12 @@ func updateKarpenterNodePool(event Event) {
                                                         log.Printf("[updateKarpenterNodePool] Updating node pool %s to remove AZ %s", pool.Metadata.Name, awayZoneName)
                                                         pool.Spec.Template.Spec.Requirements[i].Values = filteredZones
 
+                                                        // Set disruption budget to 0 if do-not-disrupt is enabled
+                                                        // if doNotDisruptEnabled && len(pool.Spec.Disruption.Budgets) > 0 {
+                                                        //         pool.Spec.Disruption.Budgets[0].Nodes = "0"
+                                                        //         log.Printf("[updateKarpenterNodePool] Setting disruption budget to 0 for node pool %s (do-not-disrupt enabled)", pool.Metadata.Name)
+                                                        // }
+
                                                         // Create the update payload
                                                         updatePayload := map[string]interface{}{
                                                                 "spec": map[string]interface{}{
@@ -817,6 +1009,7 @@ func updateKarpenterNodePool(event Event) {
                                                                                         "requirements": pool.Spec.Template.Spec.Requirements,
                                                                                 },
                                                                         },
+                                                                        "disruption": pool.Spec.Disruption,
                                                                 },
                                                         }
 
@@ -872,6 +1065,12 @@ func updateKarpenterNodePool(event Event) {
                                                 Values:   updatedZones,
                                         })
                                         
+                                        // Set disruption budget to 0 if do-not-disrupt is enabled
+                                        // if doNotDisruptEnabled && len(pool.Spec.Disruption.Budgets) > 0 {
+                                        //         pool.Spec.Disruption.Budgets[0].Nodes = "0"
+                                        //         log.Printf("[updateKarpenterNodePool] Setting disruption budget to 0 for node pool %s (do-not-disrupt enabled)", pool.Metadata.Name)
+                                        // }
+
                                         // Create the update payload
                                         updatePayload := map[string]interface{}{
                                                 "spec": map[string]interface{}{
@@ -880,6 +1079,7 @@ func updateKarpenterNodePool(event Event) {
                                                                         "requirements": pool.Spec.Template.Spec.Requirements,
                                                                 },
                                                         },
+                                                        "disruption": pool.Spec.Disruption,
                                                 },
                                         }
 
@@ -959,6 +1159,12 @@ func updateKarpenterNodePool(event Event) {
                                                         pool.Metadata.Name, awayZoneName)
                                                 pool.Spec.Template.Spec.Requirements[i].Values = filteredZones
 
+                                                // Set disruption budget to 0 if do-not-disrupt is enabled
+                                                // if doNotDisruptEnabled && len(pool.Spec.Disruption.Budgets) > 0 {
+                                                //         pool.Spec.Disruption.Budgets[0].Nodes = "0"
+                                                //         log.Printf("[updateKarpenterNodePool] Setting disruption budget to 0 for node pool %s (do-not-disrupt enabled)", pool.Metadata.Name)
+                                                // }
+
                                                 // Create the update payload
                                                 updatePayload := map[string]interface{}{
                                                         "spec": map[string]interface{}{
@@ -967,6 +1173,7 @@ func updateKarpenterNodePool(event Event) {
                                                                                 "requirements": pool.Spec.Template.Spec.Requirements,
                                                                         },
                                                                 },
+                                                                "disruption": pool.Spec.Disruption,
                                                         },
                                                 }
 
@@ -1044,6 +1251,12 @@ func updateKarpenterNodePool(event Event) {
                                         Values:   updatedZones,
                                 })
                                 
+                                // Set disruption budget to 0 if do-not-disrupt is enabled
+                                // if doNotDisruptEnabled && len(pool.Spec.Disruption.Budgets) > 0 {
+                                //         pool.Spec.Disruption.Budgets[0].Nodes = "0"
+                                //         log.Printf("[updateKarpenterNodePool] Setting disruption budget to 0 for node pool %s (do-not-disrupt enabled)", pool.Metadata.Name)
+                                // }
+
                                 // Create the update payload
                                 updatePayload := map[string]interface{}{
                                         "spec": map[string]interface{}{
@@ -1052,6 +1265,7 @@ func updateKarpenterNodePool(event Event) {
                                                                 "requirements": pool.Spec.Template.Spec.Requirements,
                                                         },
                                                 },
+                                                "disruption": pool.Spec.Disruption,
                                         },
                                 }
 
@@ -1135,6 +1349,32 @@ func restoreKarpenterNodePool(event Event) {
                 return
         }
 
+        // Get zone name from zone ID (needed for both do-not-disrupt and zone restoration)
+        awayZoneName := getZoneNameFromZoneId(awayFrom, event.Region)
+        if awayZoneName == "" {
+                log.Printf("[restoreKarpenterNodePool] Failed to get zone name for zone ID: %s, using zone ID as fallback", awayFrom)
+                awayZoneName = awayFrom
+        }
+
+        // Check if do-not-disrupt feature is enabled
+        if doNotDisruptEnabled {
+                log.Println("[restoreKarpenterNodePool] do-not-disrupt feature enabled")
+
+                // Use global controller to remove protection from nodes
+                if globalNodeController != nil {
+                        if err := globalNodeController.RemoveProtectionFromNodes(context.TODO(), awayZoneName); err != nil {
+                                // This is expected if no Karpenter nodes exist in the zone
+                                log.Printf("[restoreKarpenterNodePool] Note: %v (this is normal if no Karpenter nodes exist in this zone)", err)
+                        } else {
+                                log.Printf("[restoreKarpenterNodePool] Successfully removed protection from nodes in AZ %s", awayZoneName)
+                        }
+                } else {
+                        log.Printf("[restoreKarpenterNodePool] NodeClaim controller not initialized, skipping node restoration")
+                }
+        } else {
+                log.Println("[restoreKarpenterNodePool] do-not-disrupt feature disabled, skipping node restoration")
+        }
+
         nodePools, err := clientset.RESTClient().Get().AbsPath("/apis/karpenter.sh/v1/nodepools").DoRaw(context.TODO())
         if err != nil {
                 log.Printf("[restoreKarpenterNodePool] Failed to get node pools: %v", err)
@@ -1165,13 +1405,15 @@ func restoreKarpenterNodePool(event Event) {
                 return
         }
 
-        awayZoneName := getZoneNameFromZoneId(awayFrom, event.Region)
-        if awayZoneName == "" {
-                log.Printf("[restoreKarpenterNodePool] Failed to get zone name for zone ID: %s in region %s. Cannot restore node pool without zone name.", awayFrom, event.Region)
-                return
-        }
-
         if isAutoMode {
+                // Remove NoExecute taint from nodes in the restored zone only if do-not-disrupt is disabled
+                // (taints were only added when do-not-disrupt was disabled)
+                if !doNotDisruptEnabled && globalNodeController != nil {
+                        if err := globalNodeController.RemoveTaintFromNodes(context.TODO(), awayZoneName); err != nil {
+                                log.Printf("[restoreKarpenterNodePool] Error removing taint from nodes in AZ %s: %v", awayZoneName, err)
+                        }
+                }
+                
                 // Handle both temporary and custom node pools
                 for _, pool := range nodePoolList.Items {
                         if pool.Metadata.Name == "general-purpose-kss" || pool.Metadata.Name == "system-kss" {

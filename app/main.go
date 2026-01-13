@@ -127,6 +127,17 @@ type NodePool struct {
     } `json:"spec"`
 }
 
+// getK8sConfig returns a Kubernetes config with increased QPS and Burst settings
+func getK8sConfig() (*rest.Config, error) {
+        config, err := rest.InClusterConfig()
+        if err != nil {
+                return nil, err
+        }
+        config.QPS = 100
+        config.Burst = 200
+        return config, nil
+}
+
 func init() {
         log.SetOutput(os.Stdout)
         log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -167,7 +178,7 @@ func initializeZoneMapping() error {
         }
         
         // Check if auto mode by looking for CRDs
-        k8sConfig, err := rest.InClusterConfig()
+        k8sConfig, err := getK8sConfig()
         if err != nil {
                 return fmt.Errorf("failed to create cluster config: %v", err)
         }
@@ -242,7 +253,7 @@ func main() {
         sqsClient := sqs.NewFromConfig(awsCfg)
 
         // Create Kubernetes clientset for leader election
-        k8sConfig, err := rest.InClusterConfig()
+        k8sConfig, err := getK8sConfig()
         if err != nil {
                 log.Fatalf("Failed to create cluster config: %v", err)
         }
@@ -452,7 +463,7 @@ func handleEvent(event Event) {
 
 // CreateNodePool creates a new Karpenter NodePool
 func CreateNodePool(ctx context.Context, namespace string,nodepoolName string, nodePoolSpec []byte) error {
-    k8sConfig, err := rest.InClusterConfig()
+    k8sConfig, err := getK8sConfig()
         if err != nil {
                 log.Printf("[CreateNodePool] Failed to create cluster config: %v", err)
                 return fmt.Errorf("failed to create cluster config: %v", err)
@@ -758,7 +769,7 @@ func updateKarpenterNodePool(event Event) {
         
         log.Printf("[updateKarpenterNodePool] Processing event for AZ: %s", awayFrom)
 
-        k8sConfig, err := rest.InClusterConfig()
+        k8sConfig, err := getK8sConfig()
         if err != nil {
                 log.Printf("[updateKarpenterNodePool] Failed to create cluster config: %v", err)
                 return
@@ -1336,7 +1347,7 @@ func restoreKarpenterNodePool(event Event) {
         
         log.Printf("[restoreKarpenterNodePool] Processing autoshift completed event for AZ: %s", awayFrom)
 
-        k8sConfig, err := rest.InClusterConfig()
+        k8sConfig, err := getK8sConfig()
         if err != nil {
                 log.Printf("[restoreKarpenterNodePool] Failed to create cluster config: %v", err)
                 return

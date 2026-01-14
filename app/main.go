@@ -3,6 +3,7 @@ package main
 import (
         "context"
         "encoding/json"
+        "flag"
         "fmt"
         "log"
         "os"
@@ -34,6 +35,11 @@ var (
         doNotDisruptEnabled bool // Flag to enable/disable do-not-disrupt feature
         isLeader bool // Flag to track leader status
         globalNodeController *controller.NodeClaimController // Global controller for node tracking
+        
+        // Kubernetes client configuration flags
+        kubeClientQPS   = flag.Float64("kube-client-qps", 100, "QPS for Kubernetes client")
+        kubeClientBurst = flag.Int("kube-client-burst", 200, "Burst for Kubernetes client")
+        enableDoNotDisrupt = flag.Bool("enable-do-not-disrupt", false, "Enable do-not-disrupt feature")
 )
 
 // SQSMessage represents the structure of an SQS message from EventBridge
@@ -133,8 +139,8 @@ func getK8sConfig() (*rest.Config, error) {
         if err != nil {
                 return nil, err
         }
-        config.QPS = 100
-        config.Burst = 200
+        config.QPS = float32(*kubeClientQPS)
+        config.Burst = *kubeClientBurst
         return config, nil
 }
 
@@ -198,20 +204,21 @@ func initializeZoneMapping() error {
 }
 
 func main() {
+        // Parse command-line flags
+        flag.Parse()
+        
         // Handle health check flag
         if len(os.Args) > 1 && os.Args[1] == "-health" {
                 os.Exit(0)
         }
 
-        // Parse command-line arguments for do-not-disrupt feature
-        doNotDisruptEnabled = false
-        for i := 1; i < len(os.Args); i++ {
-                if os.Args[i] == "--enable-do-not-disrupt" || os.Args[i] == "-d" {
-                        doNotDisruptEnabled = true
-                        log.Println("[main] do-not-disrupt feature enabled via command-line argument")
-                        break
-                }
+        // Set do-not-disrupt feature from flag
+        doNotDisruptEnabled = *enableDoNotDisrupt
+        if doNotDisruptEnabled {
+                log.Println("[main] do-not-disrupt feature enabled via command-line argument")
         }
+        
+        log.Printf("[main] Kubernetes client config: QPS=%.1f, Burst=%d", *kubeClientQPS, *kubeClientBurst)
 
         var err error
 

@@ -15,3 +15,7 @@ app/inflatewithouttopology.yaml
 app/nodepool1.yaml
 app/nodepool2.yaml
 .gitignore
+staticnp.yaml
+app/defaultec2nodeclass.yaml
+app/defaultnodepool.yaml
+app/dep.yaml

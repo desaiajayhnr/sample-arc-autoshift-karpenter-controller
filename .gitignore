@@ -19,3 +19,5 @@ staticnp.yaml
 app/defaultec2nodeclass.yaml
 app/defaultnodepool.yaml
 app/dep.yaml
+nodepool.yml
+nodepool.yml

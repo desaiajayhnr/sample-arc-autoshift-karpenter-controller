@@ -366,6 +366,7 @@ func listInstalledCRDs(config *rest.Config) bool {
         log.Printf("[listInstalledCRDs] nodeclasses.eks.amazonaws.com CRD not found - not EKS Auto mode")
         return false
 }
+
 // pollSQS continuously polls SQS for messages
 func pollSQS(sqsClient *sqs.Client, queueURL, podName string) {
         for {
@@ -836,6 +837,7 @@ func updateKarpenterNodePool(event Event) {
                     Kind       string           `json:"kind"`
                         Metadata NodePoolMetadata `json:"metadata"`
                         Spec struct {
+                                Weight     *int `json:"weight,omitempty"`
                                 Replicas   *int `json:"replicas,omitempty"`
                                 Disruption struct {
                                         Budgets []struct {
@@ -883,9 +885,9 @@ func updateKarpenterNodePool(event Event) {
                 }
                 
                 for _, pool := range nodePoolList.Items {
-                        // Skip static nodepools (those with static annotation)
-                        if pool.Metadata.Annotations != nil && pool.Metadata.Annotations["zonal-autoshift.eks.amazonaws.com/static-nodepool"] == "true" {
-                                log.Printf("[updateKarpenterNodePool] Skipping static nodepool %s (has static-nodepool annotation)", pool.Metadata.Name)
+                        // Skip static nodepools (those with spec.replicas set)
+                        if pool.Spec.Replicas != nil {
+                                log.Printf("[updateKarpenterNodePool] Skipping static nodepool %s (has spec.replicas=%d)", pool.Metadata.Name, *pool.Spec.Replicas)
                                 continue
                         }
                         
@@ -1148,9 +1150,12 @@ func updateKarpenterNodePool(event Event) {
                 }
         } else {
                 for _, pool := range nodePoolList.Items {
-                        // Skip static nodepools (those with static annotation)
-                        if pool.Metadata.Annotations != nil && pool.Metadata.Annotations["zonal-autoshift.eks.amazonaws.com/static-nodepool"] == "true" {
-                                log.Printf("[updateKarpenterNodePool] Skipping static nodepool %s (has static-nodepool annotation)", pool.Metadata.Name)
+                        // Debug: Log the replicas value
+                        //log.Printf("[updateKarpenterNodePool] Checking nodepool %s - Replicas: %v", pool.Metadata.Name, pool.Spec.Replicas)
+                        
+                        // Skip static nodepools (those with spec.replicas set)
+                        if pool.Spec.Replicas != nil {
+                                log.Printf("[updateKarpenterNodePool] Skipping static nodepool %s (has spec.replicas=%d)", pool.Metadata.Name, *pool.Spec.Replicas)
                                 continue
                         }
                         
@@ -1419,6 +1424,7 @@ func restoreKarpenterNodePool(event Event) {
                         Kind       string           `json:"kind"`
                         Metadata   NodePoolMetadata `json:"metadata"`
                         Spec struct {
+                                Weight     *int `json:"weight,omitempty"`
                                 Replicas   *int `json:"replicas,omitempty"`
                                 Template struct {
                                         Spec struct {
@@ -1449,9 +1455,9 @@ func restoreKarpenterNodePool(event Event) {
                 
                 // Handle both temporary and custom node pools
                 for _, pool := range nodePoolList.Items {
-                        // Skip static nodepools (those with static annotation)
-                        if pool.Metadata.Annotations != nil && pool.Metadata.Annotations["zonal-autoshift.eks.amazonaws.com/static-nodepool"] == "true" {
-                                log.Printf("[restoreKarpenterNodePool] Skipping static nodepool %s (has static-nodepool annotation)", pool.Metadata.Name)
+                        // Skip static nodepools (those with spec.replicas set)
+                        if pool.Spec.Replicas != nil {
+                                log.Printf("[restoreKarpenterNodePool] Skipping static nodepool %s (has spec.replicas=%d)", pool.Metadata.Name, *pool.Spec.Replicas)
                                 continue
                         }
                         
@@ -1528,9 +1534,9 @@ func restoreKarpenterNodePool(event Event) {
         } else {
                 // Restore zones to node pools
                 for _, pool := range nodePoolList.Items {
-                        // Skip static nodepools (those with static annotation)
-                        if pool.Metadata.Annotations != nil && pool.Metadata.Annotations["zonal-autoshift.eks.amazonaws.com/static-nodepool"] == "true" {
-                                log.Printf("[restoreKarpenterNodePool] Skipping static nodepool %s (has static-nodepool annotation)", pool.Metadata.Name)
+                        // Skip static nodepools (those with spec.replicas set)
+                        if pool.Spec.Replicas != nil {
+                                log.Printf("[restoreKarpenterNodePool] Skipping static nodepool %s (has spec.replicas=%d)", pool.Metadata.Name, *pool.Spec.Replicas)
                                 continue
                         }
                         

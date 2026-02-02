@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.24-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
 
 RUN apk add --no-cache git
 
@@ -12,7 +12,8 @@ RUN go mod download
 COPY . .
 RUN go mod tidy
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags='-s -w' -o sns-subscriber main.go && \
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -ldflags='-s -w' -o sns-subscriber main.go && \
     go clean -cache -modcache
 
 # Create a non-root user

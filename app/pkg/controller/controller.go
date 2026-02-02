@@ -261,6 +261,69 @@ func (c *NodeClaimController) AnnotateAndCordonNodes(ctx context.Context, az str
 	})
 }
 
+// AnnotateAndCordonNodesForNodePool adds the do-not-disrupt annotation and cordons nodes for a specific nodepool in an AZ
+func (c *NodeClaimController) AnnotateAndCordonNodesForNodePool(ctx context.Context, az string, nodepoolName string) error {
+	log.Printf("[AnnotateAndCordonNodesForNodePool] Looking for nodes in AZ %s for nodepool %s", az, nodepoolName)
+	
+	// Get all nodes by AZ
+	nodes := c.GetNodesByAZ(az)
+	if len(nodes) == 0 {
+		log.Printf("[AnnotateAndCordonNodesForNodePool] No nodes found in AZ %s", az)
+		return fmt.Errorf("no nodes found in availability zone %s", az)
+	}
+
+	// Filter nodes by nodepool label
+	var filteredNodes []models.NodeInfo
+	for _, nodeInfo := range nodes {
+		if nodeInfo.NodeName == "" {
+			continue
+		}
+		
+		// Get the node to check its labels
+		node, err := c.clientset.CoreV1().Nodes().Get(ctx, nodeInfo.NodeName, metav1.GetOptions{})
+		if err != nil {
+			log.Printf("[AnnotateAndCordonNodesForNodePool] Error getting node %s: %v", nodeInfo.NodeName, err)
+			continue
+		}
+		
+		// Check if node belongs to the specified nodepool
+		if nodepool, exists := node.Labels["karpenter.sh/nodepool"]; exists && nodepool == nodepoolName {
+			filteredNodes = append(filteredNodes, nodeInfo)
+		}
+	}
+	
+	if len(filteredNodes) == 0 {
+		log.Printf("[AnnotateAndCordonNodesForNodePool] No nodes found for nodepool %s in AZ %s", nodepoolName, az)
+		return fmt.Errorf("no nodes found for nodepool %s in availability zone %s", nodepoolName, az)
+	}
+
+	log.Printf("[AnnotateAndCordonNodesForNodePool] Found %d nodes for nodepool %s in AZ %s", len(filteredNodes), nodepoolName, az)
+
+	// Process nodes in batches
+	return utils.BatchProcessor(ctx, filteredNodes, func(ctx context.Context, batch []models.NodeInfo) error {
+		for _, node := range batch {
+			log.Printf("[AnnotateAndCordonNodesForNodePool] Processing node %s", node.NodeName)
+
+			// Step 1: Add the annotation
+			err := c.annotateNode(ctx, node.NodeName)
+			if err != nil {
+				log.Printf("[AnnotateAndCordonNodesForNodePool] Error annotating node %s: %v", node.NodeName, err)
+				continue
+			}
+			log.Printf("[AnnotateAndCordonNodesForNodePool] Successfully added do-not-disrupt annotation to node %s", node.NodeName)
+
+			// Step 2: Cordon the node
+			err = c.cordonNode(ctx, node.NodeName)
+			if err != nil {
+				log.Printf("[AnnotateAndCordonNodesForNodePool] Error cordoning node %s: %v", node.NodeName, err)
+				continue
+			}
+			log.Printf("[AnnotateAndCordonNodesForNodePool] Successfully cordoned node %s", node.NodeName)
+		}
+		return nil
+	})
+}
+
 // annotateNode adds the do-not-disrupt annotation to a node
 func (c *NodeClaimController) annotateNode(ctx context.Context, nodeName string) error {
 	// Get the current node
@@ -336,6 +399,69 @@ func (c *NodeClaimController) RemoveProtectionFromNodes(ctx context.Context, az 
 			log.Printf("[RemoveProtectionFromNodes] Successfully uncordoned node %s", node.NodeName)
 
 			log.Printf("[RemoveProtectionFromNodes] Successfully removed protection from node %s", node.NodeName)
+		}
+		return nil
+	})
+}
+
+// RemoveProtectionFromNodesForNodePool removes the do-not-disrupt annotation and uncordons nodes for a specific nodepool in an AZ
+func (c *NodeClaimController) RemoveProtectionFromNodesForNodePool(ctx context.Context, az string, nodepoolName string) error {
+	log.Printf("[RemoveProtectionFromNodesForNodePool] Looking for nodes in AZ %s for nodepool %s", az, nodepoolName)
+	
+	// Get all nodes by AZ
+	nodes := c.GetNodesByAZ(az)
+	if len(nodes) == 0 {
+		log.Printf("[RemoveProtectionFromNodesForNodePool] No nodes found in AZ %s", az)
+		return fmt.Errorf("no nodes found in availability zone %s", az)
+	}
+
+	// Filter nodes by nodepool label
+	var filteredNodes []models.NodeInfo
+	for _, nodeInfo := range nodes {
+		if nodeInfo.NodeName == "" {
+			continue
+		}
+		
+		// Get the node to check its labels
+		node, err := c.clientset.CoreV1().Nodes().Get(ctx, nodeInfo.NodeName, metav1.GetOptions{})
+		if err != nil {
+			log.Printf("[RemoveProtectionFromNodesForNodePool] Error getting node %s: %v", nodeInfo.NodeName, err)
+			continue
+		}
+		
+		// Check if node belongs to the specified nodepool
+		if nodepool, exists := node.Labels["karpenter.sh/nodepool"]; exists && nodepool == nodepoolName {
+			filteredNodes = append(filteredNodes, nodeInfo)
+		}
+	}
+	
+	if len(filteredNodes) == 0 {
+		log.Printf("[RemoveProtectionFromNodesForNodePool] No nodes found for nodepool %s in AZ %s", nodepoolName, az)
+		return fmt.Errorf("no nodes found for nodepool %s in availability zone %s", nodepoolName, az)
+	}
+
+	log.Printf("[RemoveProtectionFromNodesForNodePool] Found %d nodes for nodepool %s in AZ %s", len(filteredNodes), nodepoolName, az)
+
+	// Process nodes in batches
+	return utils.BatchProcessor(ctx, filteredNodes, func(ctx context.Context, batch []models.NodeInfo) error {
+		for _, node := range batch {
+			log.Printf("[RemoveProtectionFromNodesForNodePool] Processing node %s", node.NodeName)
+
+			// Step 1: Remove the annotation
+			err := c.removeAnnotation(ctx, node.NodeName)
+			if err != nil {
+				log.Printf("[RemoveProtectionFromNodesForNodePool] Error removing annotation from node %s: %v", node.NodeName, err)
+				continue
+			}
+			log.Printf("[RemoveProtectionFromNodesForNodePool] Successfully removed do-not-disrupt annotation from node %s", node.NodeName)
+
+			// Step 2: Uncordon the node
+			err = c.uncordonNode(ctx, node.NodeName)
+			if err != nil {
+				log.Printf("[RemoveProtectionFromNodesForNodePool] Error uncordoning node %s: %v", node.NodeName, err)
+				continue
+			}
+			log.Printf("[RemoveProtectionFromNodesForNodePool] Successfully uncordoned node %s", node.NodeName)
 		}
 		return nil
 	})

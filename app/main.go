@@ -888,7 +888,23 @@ func updateKarpenterNodePool(event Event) {
                         // Skip static nodepools (those with spec.replicas set)
                         if pool.Spec.Replicas != nil {
                                 log.Printf("[updateKarpenterNodePool] Skipping static nodepool %s (has spec.replicas=%d)", pool.Metadata.Name, *pool.Spec.Replicas)
-                                continue
+                                //continue
+                                awayZoneName := getZoneNameFromZoneId(awayFrom, event.Region)
+                                if awayZoneName == "" {
+                                        log.Printf("[updateKarpenterNodePool] Failed to get zone name for zone ID: %s", awayFrom)
+                                        awayZoneName = awayFrom
+                                }
+
+                                // Use global controller to annotate and cordon nodes
+                                if globalNodeController != nil {
+                                        if err := globalNodeController.AnnotateAndCordonNodesForNodePool(context.TODO(), awayZoneName, pool.Metadata.Name); err != nil {
+                                                log.Printf("[updateKarpenterNodePool] Note: %v (this is normal if no Karpenter nodes exist in this zone)", err)
+                                        } else {
+                                                log.Printf("[updateKarpenterNodePool] Successfully annotated and cordoned nodes in AZ %s for nodepool %s", awayZoneName, pool.Metadata.Name)
+                                        }
+                                } else {
+                                        log.Printf("[updateKarpenterNodePool] NodeClaim controller not initialized, skipping node annotation")
+                                }
                         }
                         
                         if pool.Metadata.Name == "general-purpose" || pool.Metadata.Name == "system" {
@@ -1156,7 +1172,22 @@ func updateKarpenterNodePool(event Event) {
                         // Skip static nodepools (those with spec.replicas set)
                         if pool.Spec.Replicas != nil {
                                 log.Printf("[updateKarpenterNodePool] Skipping static nodepool %s (has spec.replicas=%d)", pool.Metadata.Name, *pool.Spec.Replicas)
-                                continue
+                                //continue
+                                awayZoneName := getZoneNameFromZoneId(awayFrom, event.Region)
+                                if awayZoneName == "" {
+                                        log.Printf("[updateKarpenterNodePool] Failed to get zone name for zone ID: %s", awayFrom)
+                                        awayZoneName = awayFrom
+                                }
+
+                                if globalNodeController != nil {
+                                        if err := globalNodeController.AnnotateAndCordonNodesForNodePool(context.TODO(), awayZoneName, pool.Metadata.Name); err != nil {
+                                                log.Printf("[updateKarpenterNodePool] Note: %v (this is normal if no Karpenter nodes exist in this zone)", err)
+                                        } else {
+                                                log.Printf("[updateKarpenterNodePool] Successfully annotated and cordoned nodes in AZ %s for nodepool %s", awayZoneName, pool.Metadata.Name)
+                                        }
+                                } else {
+                                        log.Printf("[updateKarpenterNodePool] NodeClaim controller not initialized, skipping node annotation")
+                                }
                         }
                         
                         log.Printf("[updateKarpenterNodePool] Processing node pool: %s", pool.Metadata.Name)
@@ -1457,8 +1488,26 @@ func restoreKarpenterNodePool(event Event) {
                 for _, pool := range nodePoolList.Items {
                         // Skip static nodepools (those with spec.replicas set)
                         if pool.Spec.Replicas != nil {
+                                //log.Printf("[restoreKarpenterNodePool] Skipping static nodepool %s (has spec.replicas=%d)", pool.Metadata.Name, *pool.Spec.Replicas)
+                                //continue
                                 log.Printf("[restoreKarpenterNodePool] Skipping static nodepool %s (has spec.replicas=%d)", pool.Metadata.Name, *pool.Spec.Replicas)
-                                continue
+                                //continue
+                                awayZoneName := getZoneNameFromZoneId(awayFrom, event.Region)
+                                if awayZoneName == "" {
+                                        log.Printf("[restoreKarpenterNodePool] Failed to get zone name for zone ID: %s", awayFrom)
+                                        awayZoneName = awayFrom
+                                }
+
+                                // Use global controller to annotate and cordon nodes
+                                if globalNodeController != nil {
+                                        if err := globalNodeController.RemoveProtectionFromNodesForNodePool(context.TODO(), awayZoneName, pool.Metadata.Name); err != nil {
+                                                log.Printf("[restoreKarpenterNodePool] Note: %v (this is normal if no Karpenter nodes exist in this zone)", err)
+                                        } else {
+                                                log.Printf("[restoreKarpenterNodePool] Successfully annotated and cordoned nodes in AZ %s for nodepool %s", awayZoneName, pool.Metadata.Name)
+                                        }
+                                } else {
+                                        log.Printf("[restoreKarpenterNodePool] NodeClaim controller not initialized, skipping node annotation")
+                                }
                         }
                         
                         if pool.Metadata.Name == "general-purpose-kss" || pool.Metadata.Name == "system-kss" {
@@ -1536,8 +1585,39 @@ func restoreKarpenterNodePool(event Event) {
                 for _, pool := range nodePoolList.Items {
                         // Skip static nodepools (those with spec.replicas set)
                         if pool.Spec.Replicas != nil {
+                                //log.Printf("[restoreKarpenterNodePool] Skipping static nodepool %s (has spec.replicas=%d)", pool.Metadata.Name, *pool.Spec.Replicas)
+                                //continue
                                 log.Printf("[restoreKarpenterNodePool] Skipping static nodepool %s (has spec.replicas=%d)", pool.Metadata.Name, *pool.Spec.Replicas)
-                                continue
+                                //continue
+                                awayZoneName := getZoneNameFromZoneId(awayFrom, event.Region)
+                                if awayZoneName == "" {
+                                        log.Printf("[restoreKarpenterNodePool] Failed to get zone name for zone ID: %s", awayFrom)
+                                        awayZoneName = awayFrom
+                                }
+
+                                // Use global controller to annotate and cordon nodes
+                                if globalNodeController != nil {
+                                        if err := globalNodeController.RemoveProtectionFromNodesForNodePool(context.TODO(), awayZoneName, pool.Metadata.Name); err != nil {
+                                                log.Printf("[restoreKarpenterNodePool] Note: %v (this is normal if no Karpenter nodes exist in this zone)", err)
+                                        } else {
+                                                log.Printf("[restoreKarpenterNodePool] Successfully annotated and cordoned nodes in AZ %s for nodepool %s", awayZoneName, pool.Metadata.Name)
+                                        }
+                                } else {
+                                        log.Printf("[restoreKarpenterNodePool] NodeClaim controller not initialized, skipping node annotation")
+                                }
+                        }
+                        
+                        if pool.Metadata.Name == "general-purpose-kss" || pool.Metadata.Name == "system-kss" {
+                                // Delete temporary node pools created during autoshift
+                                log.Printf("[restoreKarpenterNodePool] Deleting temporary node pool: %s", pool.Metadata.Name)
+                                result := clientset.RESTClient().Delete().
+                                        AbsPath(fmt.Sprintf("/apis/karpenter.sh/v1/nodepools/%s", pool.Metadata.Name)).
+                                        Do(context.TODO())
+                                if err := result.Error(); err != nil {
+                                        log.Printf("[restoreKarpenterNodePool] Failed to delete node pool %s: %v", pool.Metadata.Name, err)
+                                } else {
+                                        log.Printf("[restoreKarpenterNodePool] Successfully deleted node pool %s", pool.Metadata.Name)
+                                }
                         }
                         
                         if pool.Metadata.Annotations != nil {

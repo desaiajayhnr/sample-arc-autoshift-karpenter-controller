@@ -21,3 +21,5 @@ app/defaultnodepool.yaml
 app/dep.yaml
 nodepool.yml
 nodepool.yml
+static.yaml
+pause-deployment.yaml

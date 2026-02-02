@@ -18,6 +18,9 @@ from aws_cdk.aws_eks import CfnCluster
 import json
 
 class EKSClusterStack(Stack):
+    # Karpenter version - update this to use the latest version
+    KARPENTER_VERSION = "1.8.6"
+    
     def __init__(self, scope: Construct, construct_id: str, vpc_stack: VpcStack, event_rule_stack, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
@@ -154,30 +157,22 @@ class EKSClusterStack(Stack):
                         "ec2:RunInstances",
                         "ec2:DescribeImages",
                         "ec2:TerminateInstances",
-                        "pricing:GetProducts",
-                        "ssm:GetParameter",
-                        "iam:GetInstanceProfile",
-                        "eks:DescribeCluster",
-                        "iam:CreateInstanceProfile",
-                        "iam:DeleteInstanceProfile",
-                        "iam:AddRoleToInstanceProfile",
-                        "iam:RemoveRoleFromInstanceProfile",
-                        "iam:TagInstanceProfile",
                         "ec2:DeleteLaunchTemplate",
-                        "ec2:DescribeSubnets",
-                        "ec2:RunInstances",
-                        "ec2:DescribeImages",
-                        "ec2:TerminateInstances",
                         "pricing:GetProducts",
                         "ssm:GetParameter",
+                        "eks:DescribeCluster"
+                    ],
+                    resources=["*"]
+                ),
+                iam.PolicyStatement(
+                    actions=[
                         "iam:GetInstanceProfile",
-                        "eks:DescribeCluster",
                         "iam:CreateInstanceProfile",
                         "iam:DeleteInstanceProfile",
+                        "iam:ListInstanceProfiles",
                         "iam:AddRoleToInstanceProfile",
                         "iam:RemoveRoleFromInstanceProfile",
-                        "iam:TagInstanceProfile",
-                        "ec2:DeleteLaunchTemplate"
+                        "iam:TagInstanceProfile"
                     ],
                     resources=["*"]
                 ),
@@ -256,7 +251,7 @@ class EKSClusterStack(Stack):
             "karpenter",
             chart="karpenter",
             repository="oci://public.ecr.aws/karpenter/karpenter",
-            version="1.3.0",
+            version=self.KARPENTER_VERSION,  # Use class variable for easy updates
             namespace="kube-system",
             release="karpenter",
             values={
@@ -265,12 +260,9 @@ class EKSClusterStack(Stack):
                     "name": "karpenter"
                 },
                 "settings": {
-                    "aws": {
-                        "clusterName": self.cluster.cluster_name,
-                        "clusterEndpoint": self.cluster.cluster_endpoint,
-                        "defaultInstanceProfile": instance_profile.ref,
-                        "interruptionQueueName": f"{self.cluster.cluster_name}-karpenter"
-                    }
+                    "clusterName": self.cluster.cluster_name,
+                    "clusterEndpoint": self.cluster.cluster_endpoint,
+                    "defaultInstanceProfile": instance_profile.ref
                 },
                 "crds": {
                     "create": True
@@ -285,6 +277,9 @@ class EKSClusterStack(Stack):
                             "name": "CLUSTER_ENDPOINT",
                              "value": self.cluster.cluster_endpoint
                          }
+                    ],
+                    "args": [
+                        "--feature-gates=StaticCapacity=true"
                     ],
                     "resources": {
                         "requests": {

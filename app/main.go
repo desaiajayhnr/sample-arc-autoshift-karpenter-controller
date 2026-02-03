@@ -905,6 +905,7 @@ func updateKarpenterNodePool(event Event) {
                                 } else {
                                         log.Printf("[updateKarpenterNodePool] NodeClaim controller not initialized, skipping node annotation")
                                 }
+                                continue
                         }
                         
                         if pool.Metadata.Name == "general-purpose" || pool.Metadata.Name == "system" {
@@ -1188,6 +1189,7 @@ func updateKarpenterNodePool(event Event) {
                                 } else {
                                         log.Printf("[updateKarpenterNodePool] NodeClaim controller not initialized, skipping node annotation")
                                 }
+                                continue
                         }
                         
                         log.Printf("[updateKarpenterNodePool] Processing node pool: %s", pool.Metadata.Name)
@@ -1508,6 +1510,7 @@ func restoreKarpenterNodePool(event Event) {
                                 } else {
                                         log.Printf("[restoreKarpenterNodePool] NodeClaim controller not initialized, skipping node annotation")
                                 }
+                                continue
                         }
                         
                         if pool.Metadata.Name == "general-purpose-kss" || pool.Metadata.Name == "system-kss" {
@@ -1605,6 +1608,7 @@ func restoreKarpenterNodePool(event Event) {
                                 } else {
                                         log.Printf("[restoreKarpenterNodePool] NodeClaim controller not initialized, skipping node annotation")
                                 }
+                                continue
                         }
                         
                         if pool.Metadata.Name == "general-purpose-kss" || pool.Metadata.Name == "system-kss" {

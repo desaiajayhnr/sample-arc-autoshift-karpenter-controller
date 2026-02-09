@@ -897,7 +897,7 @@ func updateKarpenterNodePool(event Event) {
 
                                 // Use global controller to annotate and cordon nodes
                                 if globalNodeController != nil {
-                                        if err := globalNodeController.AnnotateAndCordonNodesForNodePool(context.TODO(), awayZoneName, pool.Metadata.Name); err != nil {
+                                        if err := globalNodeController.CordonNodesForNodePool(context.TODO(), awayZoneName, pool.Metadata.Name); err != nil {
                                                 log.Printf("[updateKarpenterNodePool] Note: %v (this is normal if no Karpenter nodes exist in this zone)", err)
                                         } else {
                                                 log.Printf("[updateKarpenterNodePool] Successfully annotated and cordoned nodes in AZ %s for nodepool %s", awayZoneName, pool.Metadata.Name)
@@ -1181,7 +1181,7 @@ func updateKarpenterNodePool(event Event) {
                                 }
 
                                 if globalNodeController != nil {
-                                        if err := globalNodeController.AnnotateAndCordonNodesForNodePool(context.TODO(), awayZoneName, pool.Metadata.Name); err != nil {
+                                        if err := globalNodeController.CordonNodesForNodePool(context.TODO(), awayZoneName, pool.Metadata.Name); err != nil {
                                                 log.Printf("[updateKarpenterNodePool] Note: %v (this is normal if no Karpenter nodes exist in this zone)", err)
                                         } else {
                                                 log.Printf("[updateKarpenterNodePool] Successfully annotated and cordoned nodes in AZ %s for nodepool %s", awayZoneName, pool.Metadata.Name)
